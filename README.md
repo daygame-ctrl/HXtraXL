@@ -10,9 +10,11 @@ Independently maintained custom firmware for the **Line 6 HX Stomp XL**, based o
 - Tap tempo display, tuner controls, metronome, virtual footswitches, and preset LED colors.
 - Original Line 6 model names. The beat dot and breathing animation default to Off.
 
-## Availability
+## Setup
 
-The XL source, Windows build guide, and owner’s guide are being prepared for this repository. The firmware build starts from your own copy of the original HX Stomp XL 3.80.0 file. This repository does not distribute firmware images or NAM captures.
+[Open the HXtraXL 1.0 setup page](https://daygame-ctrl.github.io/HXtraXL/HXtraXL-setup.html). It accepts only the original HX Stomp XL 3.80.0 firmware file and builds locally in your browser.
+
+The XL source and Windows build guide are being prepared for this repository.
 
 ## Owner’s guide
 
