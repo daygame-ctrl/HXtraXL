@@ -8,7 +8,7 @@ import sys
 from tempfile import TemporaryDirectory
 import zlib
 
-TOOLS = Path(__file__).resolve().parents[2] / "tools"
+TOOLS = Path(__file__).resolve().parent.parent / "work" / "hxtra" / "tools"
 sys.path.insert(0, str(TOOLS))
 import hxf
 import l6ia

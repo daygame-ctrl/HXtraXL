@@ -7,7 +7,7 @@ import sys
 from types import SimpleNamespace
 
 WORK = Path(__file__).resolve().parent
-REPO = WORK.parents[1]
+REPO = WORK / "hxtra"
 sys.path.insert(0, str(REPO / "tools"))
 import m4asm
 import patch_amp

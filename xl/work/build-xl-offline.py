@@ -7,7 +7,7 @@ import sys
 
 WORK = Path(__file__).resolve().parent
 ROOT = WORK.parent
-sys.path.insert(0, str(ROOT.parent / "tools"))
+sys.path.insert(0, str(WORK / "hxtra" / "tools"))
 import hxf_ram
 import image_store
 import l6ia

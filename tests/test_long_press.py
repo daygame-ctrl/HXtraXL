@@ -19,6 +19,9 @@ HOME_CTOR_CALL, HOME_CTOR = 0x28d96c44, 0x28dc91d0
 CODE, OBJ, EVENT, LISTS = 0x28e60000, 0x28128a80, 0x28600000, 0x28128b4c
 STOCK = 0x28700000                  # the stock handler, as the veneer hands it over
 FUNCS, GUARD, REQUEST_TUNER, GET_LISTS, MOMENTARY = 0x28128a74, 0x28d96134, 0x28d96588, 0x28d96084, 0x28dd83c4
+REQUEST_VIEW, REQUEST_PANEL = 0x28d96320, 0x28d9638c
+HOME_VIEW, TUNER_VIEW, GLOBAL_EQ_VIEW = 0, 5, 6
+TOUCH1, TOUCHED = 9, 0x7d           # touches on footswitches 1..3 are codes 9..11; touched flags at the object's +0x7d + k
 FS_MODE = 21
 PRESS, RELEASE, CLICK, HOLD = 1, 2, 3, 5
 TUNER, FS4, FS5 = 1, 2, 3
@@ -28,8 +31,13 @@ TONE_OF, TONE, GET_BYPASS, CONTROL = 0x28d92a98, 0x28490000, 0x28e04514, 0x28dde
 ON, OFF = 0x3f800000, 0
 GET_FUNCTIONS, FUNCTIONS_BASE = 0x28d9607c, 0x28128a70
 DISPATCH_EXIT = bytes.fromhex('04b0 70bd')      # add sp,#16; pop {r4,r5,r6,pc}: how the dispatch's cases return
-TUNER_FN, STOMP, BANK_UP, PRESET_UP, SNAPSHOT_DN, FS_MODE_UP, TOGGLE_EXP = 0, 1, 2, 4, 7, 8, 11     # FS6..FS10 Function values
+TUNER_FN, STOMP, BANK_UP, PRESET_UP, SNAPSHOT_DN, FS_MODE_UP, TOGGLE_EXP, GLOBAL_EQ = 0, 1, 2, 4, 7, 8, 11, 12     # FS6..FS10 Function values
 TAP_CORE = 0x28d9bfa8
+WIDGET_LOCK, WIDGET_UNLOCK, MEMSET, BLOCK_INFO = 0x28e24970, 0x28e24ae8, 0x28e24b78, 0x28e0fe94
+IS_LOOPER, IS_SHUFFLING_LOOPER = 0x28de778c, 0x28de779c
+LOOPERS = (504, 505, 570, 571, 616, 617)    # 1 Switch Looper mono/stereo, Shuffling Looper's two pairs
+INFO_SIZE = 0x34
+NODES = 0x28630000
 
 
 class Handler:
@@ -39,11 +47,13 @@ class Handler:
         code, self.sym = m4emu.assemble('src/m4/long_press.s', MODS, IDS)
         self.m = m4emu.M4(code, CODE)
         self.settings = {FS_MODE: 0, **{pid: 0 for pid in HOLD_IDS}}     # Off unless a test sets an action
-        self.momentary, self.guard, self.seen = set(), 0, []
+        self.momentary, self.view, self.seen = set(), HOME_VIEW, []
         self.m.stub(pm.GET_VALUE, self._get_value)
         self.m.stub(STOCK, self._stock)
-        self.m.stub(GUARD, lambda m: m.reg('r0', self.guard))
+        self.m.stub(GUARD, lambda m: m.reg('r0', int(m.reg('r0') == self.view)))
         self.m.stub(REQUEST_TUNER)
+        self.m.stub(REQUEST_VIEW)
+        self.m.stub(REQUEST_PANEL)
         self.m.stub(GET_LISTS, lambda m: m.reg('r0', LISTS))
         self.m.stub(MOMENTARY, lambda m: m.reg('r0', int(m.reg('r1') in self.momentary)))
         self.bypassed, self.order = {}, []
@@ -61,6 +71,36 @@ class Handler:
         self.m.stub(GET_FUNCTIONS, lambda m: m.reg('r0', FUNCTIONS_BASE))
         for at in (long_press.SWITCH + 0xe, long_press.TOGGLE_EXP):
             self.m.stub(at, lambda m, at=at: self._case(m, at), code=DISPATCH_EXIT)
+        self.models, self.info_fails = {}, set()     # block -> preset model ID; blocks whose info lookup fails
+        for k in range(5):
+            self.blocks(k)
+        self.m.stub(WIDGET_LOCK, lambda m: self.order.append(('wlock',)))
+        self.m.stub(WIDGET_UNLOCK, lambda m: self.order.append(('wunlock',)))
+        self.m.stub(MEMSET, lambda m: m.write(m.reg('r0'), bytes([m.reg('r1')]) * m.reg('r2')))
+        self.m.stub(BLOCK_INFO, self._block_info)
+        self.m.stub(IS_LOOPER, lambda m: m.reg('r0', int(m.reg('r0') in (504, 505))))
+        self.m.stub(IS_SHUFFLING_LOOPER, lambda m: m.reg('r0', int(m.reg('r0') in (570, 571, 616, 617))))
+
+    def _block_info(self, m):
+        assert m.reg('r0') == TONE
+        block, info = m.reg('r1'), m.reg('r2')
+        self.order.append(('info', block, m.read(info, INFO_SIZE) == bytes(INFO_SIZE)))
+        if block in self.info_fails:
+            m.reg('r0', -44)
+            return
+        if block in self.models:
+            m.write(info + 1, struct.pack('<H', self.models[block]))
+        m.reg('r0', 0)
+
+    def blocks(self, k, *nodes):
+        """Footswitch k's bypass assignment list, as nodes (kind, block): kind 1 a block, as the stock press walks it."""
+        head = LISTS + 0x20 * (k + 1)
+        at = [NODES + 0x400 * k + 0x40 * i for i in range(len(nodes))]
+        for i, (kind, block) in enumerate(nodes):
+            self.m.u32(at[i], at[i + 1] if i + 1 < len(nodes) else head)
+            self.m.u8(at[i] + 9, kind)
+            self.m.u32(at[i] + 0xc, block)
+        self.m.u32(head, at[0] if nodes else head)
 
     def _case(self, m, at):
         """Entered as the dispatch is there: its frame on the stack, r4 k, r6 the object, r0 footswitch k's function slot."""
@@ -132,6 +172,10 @@ class Handler:
         assert all(src == 1 for src, _, _ in self.seen)
         return [(c, t) for _, c, t in self.seen], len(self.m.calls(REQUEST_TUNER))
 
+    def requests(self):
+        """The view and panel requests, in order."""
+        return [('view' if at == REQUEST_VIEW else 'panel', regs[0]) for at, regs in self.m.log if at in (REQUEST_VIEW, REQUEST_PANEL)]
+
 
 def tap(code):
     return [(code, PRESS), (code, RELEASE), (code, CLICK)]
@@ -162,7 +206,7 @@ def test_function_settings():
     for n, s in zip((6, 7, 8, 9, 10), long_press.FUNCTIONS):
         assert (s.key, s.label, s.default) == (f'fs{n}_function', f'Function\nFS{n}'.encode(), STOMP)
         assert s.values == (b'Tuner', f'Stomp {n}'.encode(), b'Bank Up', b'Bank Dn', b'PresetUp', b'PresetDn', b'SnpshtUp',
-                            b'SnpshtDn', b'FS Mode>', b'<FS Mode', b'AllBypas', b'TogglEXP')
+                            b'SnpshtDn', b'FS Mode>', b'<FS Mode', b'AllBypas', b'TogglEXP', b'GlobalEQ')
         assert all(len(v) <= 8 for v in s.values)
     assert FUNCTION_IDS == [0xda, 0xdb, 0xdc, 0xdd, 0xde], 'a unit keeps a setting\'s value by ID: never move it once a build has used it'
 
@@ -175,7 +219,7 @@ def test_the_values_follow_the_stock_ones_and_the_dispatch_switches_on_value_plu
     values = long_press.FUNCTIONS[0].values
     first = e0.index(b'TAP/Tunr' + b'\0' * 12 + b'Stomp 3\0')
     stock = [e0[first + 20 * i:].split(b'\0')[0] for i in range(12)]
-    assert stock[0] == b'TAP/Tunr' and stock[1:] == [b'Stomp 3'] + list(values[2:])
+    assert stock[0] == b'TAP/Tunr' and stock[1:] == [b'Stomp 3'] + list(values[2:GLOBAL_EQ])
     read = reader(e0)
     assert read(long_press.SWITCH, len(long_press.SWITCH_STOCK)) == long_press.SWITCH_STOCK
     assert read(long_press.TOGGLE_EXP, len(long_press.TOGGLE_EXP_STOCK)) == long_press.TOGGLE_EXP_STOCK
@@ -196,12 +240,12 @@ def test_tap_with_a_hold_action_toggles_on_the_click(h):
 def test_hold_opens_the_tuner_without_toggling(h):
     h.hold_action(2, TUNER)
     assert h.run(*held(13)) == ([(13, RELEASE)], 1)
-    assert h.m.calls(GUARD)[0][0] == 5
+    assert [5] == [v for v, *_ in h.m.calls(GUARD) if v != GLOBAL_EQ_VIEW]
 
 
 def test_hold_does_not_open_the_tuner_when_the_guard_refuses(h):
     h.hold_action(3, TUNER)
-    h.guard = 1
+    h.view = TUNER_VIEW
     assert h.run(*held(14)) == ([(14, RELEASE)], 0)
 
 
@@ -238,6 +282,54 @@ def test_a_momentary_footswitch_stays_stock(h):
     h.momentary.add(1)
     assert h.run(*held(13)) == (held(13), 0)
     assert h.m.calls(GET_LISTS) and h.m.calls(MOMENTARY)[0][1] == 1
+
+
+@pytest.mark.parametrize('model', LOOPERS)
+def test_a_looper_footswitch_stays_stock(h, model):
+    """The looper latches on the press and its hold (undo, clear) acts only then, so its switch keeps every event as stock."""
+    h.hold_action(1, FS6)
+    h.blocks(0, (1, 7))
+    h.models[7] = model
+    assert h.run(*held(12), *tap(12)) == (held(12) + tap(12), 0)
+    assert not h.m.calls(CONTROL)
+
+
+def test_a_looper_anywhere_in_the_list_counts(h):
+    h.hold_action(3, TUNER)
+    h.blocks(2, (1, 4), (2, 0), (1, 9))
+    h.models.update({4: 100, 9: 505})
+    assert h.run(*held(14)) == (held(14), 0)
+
+
+@pytest.mark.parametrize('model', [0, 100, 503, 506, 569, 572, 615, 618])
+def test_other_blocks_keep_the_hold_action(h, model):
+    h.hold_action(1, TUNER)
+    h.blocks(0, (1, 7))
+    h.models[7] = model
+    assert h.run(*held(12)) == ([(12, RELEASE)], 1)
+
+
+def test_only_block_nodes_are_looked_up_and_a_failed_lookup_is_skipped(h):
+    h.hold_action(1, TUNER)
+    h.blocks(0, (2, 3), (1, 5), (1, 6))
+    h.info_fails.add(5)
+    h.models.update({3: 504, 5: 504})
+    assert h.run(*held(12)) == ([(12, RELEASE)], 1)
+    assert [o[1] for o in h.order if o[0] == 'info'] == [5, 6, 5, 6], 'press and hold each walk blocks 5 and 6 only'
+
+
+def test_the_list_is_walked_under_the_widget_lock_with_a_cleared_info(h):
+    h.hold_action(2, TUNER)
+    h.blocks(1, (1, 5), (1, 6))
+    h.run((13, PRESS))
+    assert h.order == [('wlock',), ('info', 5, True), ('info', 6, True), ('wunlock',)]
+
+
+def test_a_footswitch_with_no_hold_action_skips_the_walk(h):
+    h.blocks(0, (1, 7))
+    h.models[7] = 504
+    h.run(*held(12))
+    assert h.order == []
 
 
 @pytest.mark.parametrize('n, code', [(4, 15), (5, 16)])
@@ -310,8 +402,9 @@ def test_the_scan_holds_only_the_controllers_lock_and_releases_it_before_the_cal
     h.node(4, kind=2, cc=20, block=9)
     h.bypassed[9] = 1
     h.hold(12)
-    assert [o[0] for o in h.order] == ['lock', 'unlock', 'get', 'control']
-    assert h.order[0][1] == h.order[1][1] == CONTROLLERS + 4
+    assert [o[0] for o in h.order] == ['wlock', 'wunlock', 'wlock', 'wunlock', 'lock', 'unlock', 'get', 'control'], \
+        'the press and the hold each walk for a looper under the widget lock, released before the scan'
+    assert h.order[4][1] == h.order[5][1] == CONTROLLERS + 4
 
 
 def test_with_no_block_to_read_the_virtual_footswitch_alternates(h):
@@ -381,16 +474,110 @@ def test_tuner_opens_the_tuner_as_a_tuner_hold_does(h):
     h.hold_action(3, FS6 + 4)
     h.virtual_function(10, TUNER_FN)
     assert h.run(*held(14)) == ([(14, RELEASE)], 1)
-    assert h.m.calls(GUARD)[0][0] == 5 and not h.m.calls(TAP_CORE) and h.cases == []
-    h.guard = 1
+    assert [5] == [v for v, *_ in h.m.calls(GUARD) if v != GLOBAL_EQ_VIEW] and not h.m.calls(TAP_CORE) and h.cases == []
+    h.view = TUNER_VIEW
     assert h.run(*held(14)) == ([(14, RELEASE)], 0)
 
 
 def test_a_stored_function_out_of_range_reads_stomp(h):
     h.hold_action(1, FS6)
-    h.virtual_function(6, 12)
+    h.virtual_function(6, GLOBAL_EQ + 1)
     assert h.hold(12) == [('control', CONTROLLERS, 8, 20, ON)]
     assert h.cases == []
+
+
+def test_global_eq_opens_global_eq_as_global_settings_does(h):
+    """View gGlobalEQViewID, then its panel 8, as Global Settings' Global EQ item asks; no dispatch, no CC, no tuner."""
+    h.hold_action(2, FS6 + 3)
+    h.virtual_function(9, GLOBAL_EQ)
+    h.node(0, kind=2, cc=23, block=4)
+    assert h.run(*held(13)) == ([(13, RELEASE)], 0)
+    assert h.requests() == [('view', GLOBAL_EQ_VIEW), ('panel', 8)]
+    assert h.cases == [] and not h.m.calls(CONTROL)
+
+
+@pytest.mark.parametrize('code', [12, 14, 16])
+def test_in_global_eq_any_footswitch_press_goes_home_and_its_events_go_with_it(h, code):
+    """As the Home key asks: view 0, then panel 1. The press, hold and release never reach the stock handler, so no block toggles
+    and no tap counts; the click after the release passes, which the stock handler ignores."""
+    h.view = GLOBAL_EQ_VIEW
+    assert h.run(*held(code)) == ([], 0)
+    assert h.requests() == [('view', HOME_VIEW), ('panel', 1)]
+    h.view = HOME_VIEW
+    assert h.run(*tap(code)) == (tap(code), 0), 'the next press is a normal one'
+
+
+def test_global_eq_exit_holds_in_every_footswitch_mode_and_before_a_hold_action(h):
+    h.settings[FS_MODE] = 3
+    h.hold_action(1, TUNER)
+    h.view = GLOBAL_EQ_VIEW
+    assert h.run(*tap(12)) == ([(12, CLICK)], 0)
+    assert h.requests() == [('view', HOME_VIEW), ('panel', 1)]
+
+
+def test_outside_global_eq_presses_stay_as_they_were(h):
+    h.view = TUNER_VIEW
+    assert h.run(*tap(12)) == (tap(12), 0)
+    assert h.requests() == []
+
+
+def test_a_held_footswitchs_touch_hold_is_dropped(h):
+    """Its touch hold would open "Assign block to FS?" in the Edit view, as the held-back press never cleared the touch."""
+    h.hold_action(1, FS6)
+    assert h.run((12, PRESS), (TOUCH1, HOLD)) == ([], 0)
+    h.hold_action(2, 0)
+    assert h.run((TOUCH1 + 1, PRESS), (TOUCH1 + 1, HOLD)) == ([(TOUCH1 + 1, PRESS), (TOUCH1 + 1, HOLD)], 0), 'a touch alone stays stock'
+
+
+def test_a_hold_action_clears_its_touch_so_a_later_touch_hold_does_nothing(h):
+    h.hold_action(3, FS6)
+    h.m.u8(OBJ + TOUCHED + 2, 1)
+    h.run(*held(14))
+    assert h.m.read(OBJ + TOUCHED + 2, 1) == b'\0'
+    h.hold_action(4, FS6)
+    h.m.u8(OBJ + TOUCHED + 2, 1)
+    h.run(*held(15))
+    assert h.m.read(OBJ + TOUCHED + 2, 1) == b'\x01', 'FS4 has no touch'
+
+
+def test_a_touch_hold_after_a_global_eq_exit_is_dropped(h):
+    h.view = GLOBAL_EQ_VIEW
+    assert h.run((13, PRESS), (TOUCH1 + 1, HOLD), (13, RELEASE)) == ([], 0)
+
+
+def test_global_eq_leaves_the_tuner_alone(h):
+    h.hold_action(1, FS6)
+    h.virtual_function(6, GLOBAL_EQ)
+    h.view = TUNER_VIEW
+    assert h.run(*held(12)) == ([(12, RELEASE)], 0)
+    assert h.requests() == []
+
+
+@pytest.mark.firmware
+def test_global_eq_requests_as_the_stock_global_eq_item_and_home_key_do():
+    """Global Settings' Global EQ item ends with view 6 then a tail call of panel 8; the Home key with view 0 then panel 1."""
+    read = reader(stock_e0())
+    assert branch_target(0x28dce510, read(0x28dce510, 4)) == REQUEST_VIEW and read(0x28dce50e, 2) == bytes([GLOBAL_EQ_VIEW, 0x20])
+    assert branch_target(0x28dce51c, read(0x28dce51c, 4)) == REQUEST_PANEL and read(0x28dce514, 2) == bytes([8, 0x20])
+    assert branch_target(0x28dcfa1c, read(0x28dcfa1c, 4)) == REQUEST_VIEW and read(0x28dcfa1a, 2) == bytes([HOME_VIEW, 0x20])
+    assert branch_target(0x28dcfa26, read(0x28dcfa26, 4)) == REQUEST_PANEL and read(0x28dcfa24, 2) == bytes([1, 0x20])
+
+
+@pytest.mark.firmware
+def test_the_looper_check_follows_the_stock_press():
+    """The stock press clears a 0x34-byte info, looks each block up (0x28e0fe94) and, for a looper's category, tests the preset
+    ID at info+1 with the 1 Switch and Shuffling Looper predicates; those take the IDs in LOOPERS."""
+    read = reader(stock_e0())
+    assert read(0x28dd1190, 4) == bytes.fromhex('0021 3422'), 'movs r1, #0; movs r2, #0x34'
+    assert branch_target(0x28dd1196, read(0x28dd1196, 4)) == MEMSET
+    assert branch_target(0x28dd11a2, read(0x28dd11a2, 4)) == BLOCK_INFO
+    assert branch_target(0x28dd13b4, read(0x28dd13b4, 4)) == IS_LOOPER
+    assert branch_target(0x28dd13c2, read(0x28dd13c2, 4)) == IS_SHUFFLING_LOOPER
+    assert branch_target(0x28dd10e8, read(0x28dd10e8, 4)) == WIDGET_LOCK
+    assert branch_target(0x28dd1110, read(0x28dd1110, 4)) == WIDGET_UNLOCK
+    assert read(IS_LOOPER, 4) == bytes.fromhex('a0f5fc70'), 'sub.w r0, r0, #504'
+    assert read(IS_SHUFFLING_LOOPER, 4) + read(IS_SHUFFLING_LOOPER + 8, 4) == bytes.fromhex('a0f23a23 a0f51a70'), \
+        'subw r3, r0, #570; sub.w r0, r0, #616'
 
 
 BUF = 0x28610000

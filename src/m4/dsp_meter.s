@@ -1,6 +1,7 @@
 @ dsp_meter.s - the per-block DSP usage meter: each block in the Edit view's signal-flow row shows its share of the DSP in per cent, in black,
 @ and the top right corner shows their sum against what blocks may use (90% less the firmware's fixed 15%), as used/75,
-@ in a text widget of our own on the block title's baseline.
+@ as Global Settings > DSP Usage Display > Total asks: Small (3x5 digits at 2x), Large (a text widget of our own on the block title's baseline) or Off.
+@ DSP Usage Display > Model Browser and Edit Blocks turn the numbers on or off in the model browser and in the Edit view's blocks.
 @ The Edit view's top half (0x281282f8) has eight block slots, image widgets at view+0x4a4+0x24k, hidden when empty.
 @ DSP costs are the firmware's own, in hundredths of a per cent (the preset total adds 1500 and must stay within 9000).
 @ The model browser (0x281299d0) lists five models a page, each with its category's icon: dsp_browser centres each model's cost in white between its icon and name,
@@ -8,6 +9,16 @@
 @ tools/features/dsp_meter.py chains dsp_paint after the Edit view top half's stock paint and dsp_browser after the browser's; patch_menu.py assembles this at build time.
 .syntax unified
 .thumb
+.include "hxtra.inc"
+.equ METER_NO_BLOCKS, 1             @ read_settings' r0: Edit Blocks Off
+.equ METER_NO_BROWSER, 2            @ Model Browser Off
+.equ TOTAL_SMALL, 0                 @ DSP > Total
+.equ TOTAL_LARGE, 1
+.equ TOTAL_OFF, 2
+.equ SMALL_SCALE, 2
+.equ SMALL_TOP, 232                 @ the 3x5 digits' top, where the glyph total sat before the text widget
+.equ SMALL_GLYPHS, 6                @ the most a total takes: 999/75
+.equ SMALL_WIDTH, SMALL_GLYPHS * 4 * SMALL_SCALE - SMALL_SCALE
 .equ BUDGET, 75                     @ per cent of the DSP blocks may use: the preset limit 9000 less its fixed 1500, in hundredths
 .equ TOTAL_RIGHT, 316
 .equ TOTAL_TOP, 228                 @ the title's baseline (its top 0xea less ink row 22) plus this font's ink row 16
@@ -15,7 +26,8 @@
 .thumb_func
 dsp_paint:                          @ r0 the framebuffer, r1 the Edit view's top half, after its stock paint
     push {r4-r7, lr}
-    sub sp, #44                     @ 0 the eight slots' DSP costs (-1 for none), 32 the blocks' sum in per cent (-1 for none)
+    sub sp, #44                     @ 0 the eight slots' DSP costs (-1 for none), 32 the blocks' sum in per cent (-1 for none),
+                                    @ 36 which numbers are off, 40 DSP > Total
     mov r4, r0
     mov r5, r1
     movs r6, #0
@@ -52,8 +64,14 @@ first_row:
     ldr r3, =0x28e0785d
     blx r3
 costed:
+    bl read_settings                @ outside both locks
+    str r0, [sp, #36]
+    str r1, [sp, #40]
     ldr r3, =0x28e24971             @ the widget lock
     blx r3
+    ldr r0, [sp, #36]
+    tst r0, #METER_NO_BLOCKS
+    bne slots_done
     addw r5, r5, #0x4a4
     movs r6, #0
 slot:                               @ all this is in the framebuffer only, so whatever the stock paint redrew or hid has lost it
@@ -75,7 +93,9 @@ next:
     adds r6, #1
     cmp r6, #8
     bne slot
+slots_done:
     ldr r0, [sp, #32]
+    ldr r1, [sp, #40]
     bl total
     ldr r3, =0x28e24ae9
     blx r3
@@ -92,14 +112,21 @@ next:
 .thumb_func
 dsp_browser:                        @ r0 the framebuffer, r1 the model browser, after its stock paint
     push {r4-r8, lr}
-    sub sp, #16                     @ 0 the browser level, 4 a model's browser item, then its cost, 8 the blocks' sum
+    sub sp, #24                     @ 0 the browser level, 4 a model's browser item, then its cost, 8 the blocks' sum,
+                                    @ 12 DSP > Total, 16 which numbers are off
     mov r4, r0
     mov r5, r1
     bl blocks_total
     str r0, [sp, #8]
+    bl read_settings                @ outside both locks, as blocks_total leaves them
+    str r1, [sp, #12]
+    str r0, [sp, #16]
     ldrb r2, [r5, #0x40]
     cmp r2, #MODELS
+    bne not_models
+    tst r0, #METER_NO_BROWSER
     beq models
+not_models:
     ldr r3, =0x28e24971
     blx r3
     adr.w r3, drawn                 @ no widget covers the labels, so leaving the model list must wipe them
@@ -179,11 +206,12 @@ next_item:
     bne item
 browser_total:                      @ in the Edit view's corner, which the browser leaves free
     ldr r0, [sp, #8]
+    ldr r1, [sp, #12]
     bl total
     ldr r3, =0x28e24ae9
     blx r3
     movs r0, #0
-    add sp, #16
+    add sp, #24
     pop {r4-r8, pc}
 
 edge:                               @ r0 a browser row, r5 the browser -> r0 the x just right of its icon, within 0..NAMES_X - 1
@@ -252,9 +280,30 @@ label:                              @ r0 a browser row, r1 a number 0..999, r2 i
     add sp, #12
     pop {r5, r6, pc}
 
-total:                              @ r0 the blocks' sum in per cent (-1 for none), r4 the framebuffer
+read_settings:                      @ -> r0 METER_NO_BLOCKS and METER_NO_BROWSER as they are Off, r1 DSP > Total
+    push {r3-r5, lr}
+    movs r0, #SETTING_DSP_METER_TOTAL
+    movs r1, #SETTING_DSP_METER_TOTAL_MAX
+    movs r2, #SETTING_DSP_METER_TOTAL_DEFAULT
+    bl hxtra_setting_get
+    mov r4, r0
+    movs r0, #SETTING_DSP_METER_BLOCKS
+    movs r1, #SETTING_DSP_METER_BLOCKS_MAX
+    movs r2, #SETTING_DSP_METER_BLOCKS_DEFAULT
+    bl hxtra_setting_get
+    mov r5, r0
+    movs r0, #SETTING_DSP_METER_BROWSER
+    movs r1, #SETTING_DSP_METER_BROWSER_MAX
+    movs r2, #SETTING_DSP_METER_BROWSER_DEFAULT
+    bl hxtra_setting_get
+    orr r0, r5, r0, lsl #1          @ On 0, Off 1
+    mov r1, r4
+    pop {r3-r5, pc}
+
+total:                              @ r0 the blocks' sum in per cent (-1 for none), r1 DSP > Total, r4 the framebuffer
     push {r3-r7, lr}                @ under the widget lock
     mov r6, r0
+    mov r5, r1
     adr.w r7, total_widget
     adr.w r0, total_made
     ldrb r1, [r0]
@@ -283,18 +332,30 @@ total:                              @ r0 the blocks' sum in per cent (-1 for non
     ldr r3, =0x28e24a29             @ setColor: white, as the title
     blx r3
 made:
+    adr.w r0, small_drawn           @ Small's digits are framebuffer only: wipe them before they change or go
+    ldr r1, [r0]
+    cbz r1, small_clean
+    movs r1, #0
+    str r1, [r0]
+    bl small_wipe
+small_clean:
+    adr.w r0, large_shown
+    cmp r5, #TOTAL_LARGE
+    beq large
+    ldr r1, [r0]                    @ Off or Small: the widget is left alone, but once hidden and erased if it showed
+    cbz r1, small
+    movs r1, #0
+    str r1, [r0]
+    bl widget_show
+    b small
+large:
+    movs r1, #1
+    str r1, [r0]
     movs r1, #0
     cmp r6, #0
-    blt show                        @ no DSP model: hidden
+    blt large_show                  @ no DSP model: hidden
     adr.w r1, total_text
-    mov r0, r6
-    bl digits
-    movs r2, #'/'
-    strb r2, [r0], #1
-    mov r1, r0
-    movs r0, #BUDGET
-    bl digits
-shown:
+    bl used_of_budget
     movs r2, #0
     strb r2, [r0]
     mov r0, r7
@@ -303,7 +364,38 @@ shown:
     ldr r3, =0x28e24bc1             @ setText
     blx r3
     movs r1, #1                     @ showing marks it dirty every paint, so it is redrawn whatever the stock paint drew
-show:
+large_show:
+    bl widget_show
+    b total_out
+small:
+    cmp r5, #TOTAL_SMALL
+    bne total_out
+    cmp r6, #0
+    blt total_out
+    adr.w r1, total_text            @ Small: the 3x5 digits in white, right-aligned where the widget's text ends
+    bl used_of_budget
+    adr.w r1, total_text
+    subs r5, r0, r1                 @ how many glyphs
+    adr.w r12, style
+    movs r2, #SMALL_SCALE
+    str r2, [r12]
+    mvn r2, #0xff000000            @ white
+    str r2, [r12, #4]
+    lsls r2, r5, #3                 @ 8 a glyph at 2x, less the last one's gap
+    subs r2, #SMALL_SCALE
+    rsb r2, r2, #TOTAL_RIGHT
+    movs r3, #SMALL_TOP
+    mov r0, r1
+    mov r1, r5
+    bl put
+    adr.w r0, small_drawn
+    movs r1, #1
+    str r1, [r0]
+total_out:
+    pop {r3-r7, pc}
+
+widget_show:                        @ r1 visible, r7 the total's widget, r4 the framebuffer
+    push {lr}
     mov r0, r7
     ldr r3, =0x28e24bc9             @ setVisible
     blx r3
@@ -317,7 +409,35 @@ show:
     mov r2, r7
     ldr r3, =0x28e24c31             @ draw(fb, fb, widget)
     blx r3
-    pop {r3-r7, pc}
+    pop {pc}
+
+used_of_budget:                     @ r6 the blocks' sum, r1 where the text goes -> r0 past "sum/75"
+    push {lr}
+    mov r0, r6
+    bl digits
+    movs r2, #'/'
+    strb r2, [r0], #1
+    mov r1, r0
+    movs r0, #BUDGET
+    bl digits
+    pop {pc}
+
+small_wipe:                         @ r4 the framebuffer: black over the room Small's widest total takes
+    push {lr}
+    sub sp, #12                     @ 0 height, 4 colour, 8 anchor
+    movs r0, #(5 * SMALL_SCALE)
+    str r0, [sp]
+    movs r0, #0
+    str r0, [sp, #4]
+    str r0, [sp, #8]
+    mov r0, r4
+    movw r1, #(TOTAL_RIGHT - SMALL_WIDTH)
+    movs r2, #(SMALL_TOP - 5 * SMALL_SCALE)
+    movs r3, #SMALL_WIDTH
+    ldr.w r12, =0x100017e9
+    blx r12
+    add sp, #12
+    pop {pc}
 
 blocks_total:                       @ -> r0 the blocks' sum in per cent, or -1 with no DSP model; takes and releases the DSP model lock
     push {r3, r4, r7, lr}
@@ -468,7 +588,7 @@ digit:
     mov r0, r4
     pop {r4, pc}
 
-put:                                @ r0 ASCII digits, r1 how many, r2 left edge, r3 top edge, r4 the framebuffer; scale and colour from style
+put:                                @ r0 ASCII digits and /, r1 how many, r2 left edge, r3 top edge, r4 the framebuffer; scale and colour from style
     push {r5-r11, lr}
     sub sp, #16                     @ 0 fill height (the scale), 4 colour, 8 anchor, 12 top edge
     adr.w r12, style
@@ -486,6 +606,9 @@ put:                                @ r0 ASCII digits, r1 how many, r2 left edge
     beq put_out
 glyph:
     ldrb r0, [r8], #1
+    cmp r0, #'/'
+    it eq
+    moveq r0, #('0' + 10)           @ the font's eleventh glyph
     subs r0, #'0'
     adr.w r1, font
     ldrh.w r9, [r1, r0, lsl #1]
@@ -521,15 +644,22 @@ put_out:
     add sp, #16
     pop {r5-r11, pc}
 
+HXTRA_SETTING_GET
+
 .ltorg
 .balign 4
 style:                              @ the scale and colour put draws with
     .word 2, 0
 drawn:                              @ nonzero while the browser shows labels
     .word 0
-font:                               @ 3x5 glyphs, bit 14 the top left pixel, rows of 3 bits: 0..9
+small_drawn:                        @ nonzero while Small's digits are in the framebuffer
+    .word 0
+large_shown:                        @ nonzero while Large may have the widget showing
+    .word 0
+font:                               @ 3x5 glyphs, bit 14 the top left pixel, rows of 3 bits: 0..9, then /
     .hword 0b111101101101111, 0b010110010010111, 0b111001111100111, 0b111001111001111, 0b101101111001001
     .hword 0b111100111001111, 0b111100111101111, 0b111001001001001, 0b111101111101111, 0b111101111001111
+    .hword 0b001001010100100                    @ /
 .balign 4
 total_widget:                       @ the total's text widget
     .space 0x30
