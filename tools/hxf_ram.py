@@ -154,13 +154,13 @@ def seg_patch(segs, addr, data):
     fail(f"{addr:#x}: not in the application")
 
 
-def overlay(stock, new):
+def overlay(stock, new, full_entries=()):
     """[(sector, data)] for every sector of entries 1.. that differs from stock,
     and a line per changed entry."""
     out, notes = [], []
     for i in range(1, len(new)):
         a, b = stock[i], new[i]
-        if a == b:
+        if a == b and i not in full_entries:
             continue
         if i == 1:
             fail("entry 1 (the bootloader) differs from stock: not something to run from RAM")
@@ -171,7 +171,7 @@ def overlay(stock, new):
         for k in range(0, len(b), SECTOR):
             sb = b[k:k + SECTOR].ljust(SECTOR, b"\0")
             sa = a[k:k + SECTOR]
-            if len(sa) < SECTOR or sa != sb:      # past stock's end the card holds nothing we know
+            if i in full_entries or len(sa) < SECTOR or sa != sb:      # past stock's end the card holds nothing we know
                 out.append((PAYLOAD[i] + k // SECTOR, sb))
                 n += 1
         notes.append((i, len(a), len(b), n))
@@ -188,7 +188,7 @@ def runs_of(sectors):
     return runs
 
 
-def plan(firmware, stock_path, writes="ram", pool_sectors=4096, hook_bin=None):
+def plan(firmware, stock_path, writes="ram", pool_sectors=4096, hook_bin=None, *, full_entries=()):
     """Everything to load: regions [(addr, bytes, label)], the stock entries,
     the checks of the eMMC [(first sector, count, crc)] and a summary."""
     stock, new = load(stock_path, stock=True), load(firmware)
@@ -214,7 +214,7 @@ def plan(firmware, stock_path, writes="ram", pool_sectors=4096, hook_bin=None):
         target = struct.unpack_from("<I", hook, H_READ if name == "read" else H_WRITE)[0]
         seg_patch(segs, fn, bytes.fromhex("dff800f0") + struct.pack("<I", target))
 
-    sectors, notes = overlay(stock, new)
+    sectors, notes = overlay(stock, new, full_entries)
     runs = runs_of(sectors)
     table = RB_HOOK_BASE + ((len(hook) + 15) & ~15)
     data = (table + 4 + 12 * len(runs) + 15) & ~15
@@ -256,12 +256,21 @@ def plan(firmware, stock_path, writes="ram", pool_sectors=4096, hook_bin=None):
     regions.append((RB_HOOK_BASE, hook_region, "hook, overlay table and sectors"))
     regions.append((RB_DESC, desc, "boot descriptor"))
 
-    checks = []                                 # the sectors the overlay leaves to the card must be stock
-    for i, la, lb, n in notes:
-        full = la // SECTOR
-        for k in range(0, full, 2048):
-            c = min(2048, full - k)
-            checks.append((PAYLOAD[i] + k, c, zlib.crc32(stock[i][k * SECTOR:(k + c) * SECTOR]), i))
+    checks = []
+    covered = {sector for sector, _ in sectors}
+    for i, _, size, _ in notes:
+        full = size // SECTOR
+        first = 0
+        while first < full:
+            if PAYLOAD[i] + first in covered:
+                first += 1
+                continue
+            stop = first + 1
+            while stop < min(first + 2048, full) and PAYLOAD[i] + stop not in covered:
+                stop += 1
+            data = new[i][first * SECTOR:stop * SECTOR]
+            checks.append((PAYLOAD[i] + first, stop - first, zlib.crc32(data), i))
+            first = stop
     summary = {
         "entry": entry, "segments": [(a, len(b)) for a, b in segs], "changed": notes,
         "overlay_sectors": len(sectors), "runs": len(runs), "table": table, "pool": (pslots, pdata, pool_sectors),
@@ -522,7 +531,8 @@ def cmd_info(args):
 
 
 def cmd_plan(args):
-    regions, checks, summary = plan(args.firmware, args.stock, args.writes, args.pool)
+    regions, checks, summary = plan(args.firmware, args.stock, args.writes, args.pool,
+                                    full_entries=getattr(args, "full_entries", ()))
     describe(summary, checks)
     total = sum(len(b) for _, b, _ in regions)
     print(f"[+] {total / 1024:.0f} KiB to send in {len(regions)} regions")
@@ -538,7 +548,8 @@ def cmd_plan(args):
 
 
 def cmd_run(args):
-    regions, checks, summary = plan(args.firmware, args.stock, args.writes, args.pool)
+    regions, checks, summary = plan(args.firmware, args.stock, args.writes, args.pool,
+                                    full_entries=getattr(args, "full_entries", ()))
     describe(summary, checks)
     d = Loader()
     i = d.info

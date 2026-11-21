@@ -35,7 +35,7 @@ COMP_MODELS = (   # (model, its compressor core's primitive: one of WRAPS)
 GR_KNOBS = (   # (name, displayName, displayNameShort, value labels, default): integer lists, as Ratio
     ('GRPosition', 'Mtr Position', 'Mtr Pos', ('Middle', 'Top', 'Left', 'Bottom', 'Right'), 0),
     ('GRDirection', 'Mtr Direction', 'Mtr Dir', ('Normal', 'Reverse'), 0),
-    ('GRThickness', 'Mtr Thickness', 'Mtr Thk', tuple(str(k) for k in range(21)), 0),    # 0 is off: the meter is opt-in
+    ('GRThickness', 'Mtr Size', 'Mtr Size', ('Off', 'S', 'M', 'L', 'XL'), 0),
 )
 INT_INPUT_OP = 0x0b
 GR_PID = 100                    # src/sharc/frame_probe.asm's GR_PID: past every core's own pids (the LA Studio Comp's go to 14)
@@ -77,7 +77,9 @@ def e3_add_strings(e3, wanted):
         return bytes(e3), index
     n = nstr + len(added) // 12
     section = struct.pack('<2I', n, 8 + 12 * n + len(data)) + recs + added + data
-    if str_off < STOCK_E3_END:
+    if str_off == STR_HOME and h[6] >= STOCK_E3_END and STR_HOME + len(section) <= h[8]:
+        out = e3[:STR_HOME] + section + bytes(h[8] - STR_HOME - len(section)) + e3[h[8]:]
+    elif str_off < STOCK_E3_END:
         out = e3 + bytes(pa._align(len(e3), 0x200) - len(e3))
         h[3] = len(out)
         out += section
@@ -320,9 +322,10 @@ def e0_set_param_counts(e0, name_idx, old, new):
     return bytes(e0)
 
 
-def dsp_asm(dm, pm):
+def dsp_asm(dm, pm, source=None):
     """frame_probe.asm with its data at dm and its code at pm."""
-    return open(ASM).read().replace('GR_DM_BASE', f'{dm:#x}').replace('GR_PM_BASE', f'{pm:#x}')
+    source = open(ASM).read() if source is None else source
+    return source.replace('GR_DM_BASE', f'{dm:#x}').replace('GR_PM_BASE', f'{pm:#x}')
 
 
 def nw(pm):
@@ -330,11 +333,11 @@ def nw(pm):
     return nam_multi.NW3 + (pm - nam_multi.NW3) * 3 // 2
 
 
-def dsp_place():
+def dsp_place(layout=None, source=None):
     """(DM base, PM base) of frame_probe.asm: its data right above NAM's slots, then its code, clear of the
     Metronome's kernel under NAM's cold code (there in every build, so GR builds share one layout)."""
-    lay = patch_click.nam_layout(gr=True)
-    secs, _ = pa.sasm.assemble(dsp_asm(nam_multi.B3, nam_multi.NW3), 'frame_probe.asm')
+    lay = layout or patch_click.nam_layout(gr=True)
+    secs, _ = pa.sasm.assemble(dsp_asm(nam_multi.B3, nam_multi.NW3, source), 'frame_probe.asm')
     n_dm, n_pm = (sum(len(s.words) for s in secs if s.kind == k) for k in ('dm', 'pm'))
     dm = lay.b3_to
     pm = nam_multi.NW3 - (-(dm + n_dm - nam_multi.NW3) * 2 // 3)
@@ -346,10 +349,10 @@ def dsp_place():
     return dm, pm
 
 
-def patch_dsp(l6ia_bytes, log=print):
+def patch_dsp(l6ia_bytes, log=print, *, layout=None, source=None):
     """Entry 2: frame_probe.asm at dsp_place(), and each core of WRAPS entering it, its control function too."""
-    dm, pm = dsp_place()
-    secs, syms = pa.sasm.assemble(dsp_asm(dm, pm), 'frame_probe.asm')
+    dm, pm = dsp_place(layout, source)
+    secs, syms = pa.sasm.assemble(dsp_asm(dm, pm, source), 'frame_probe.asm')
     entries = pa.l6ia.parse(l6ia_bytes)
     e2 = l6ia_bytes[entries[2]['payload_off']: entries[2]['payload_off'] + entries[2]['payload_len']]
     ldr = []

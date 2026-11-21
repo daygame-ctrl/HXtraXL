@@ -194,7 +194,7 @@ def pm_base(n_insns, lay=None):
     return base
 
 
-def add_click(l6ia_bytes, log=print):
+def add_click(l6ia_bytes, log=print, *, layout=None):
     """The Metronome model and its kernel. Returns (new l6ia bytes, info dict)."""
     e0 = kit.get_entry_swapped(l6ia_bytes, 0)
     e3 = kit.get_entry_swapped(l6ia_bytes, 3)
@@ -246,7 +246,7 @@ def add_click(l6ia_bytes, log=print):
     e2_raw, _ = kit.expand_sharc_blob0_buffer(e2_raw)
     out, _, _ = l6ia.rebuild_archive(l6ia_bytes, {0: bytes(new_e0), 2: l6ia.swap32(e2_raw), 3: new_e3, 4: new_e4})
 
-    base = pm_base(kernel_size())
+    base = pm_base(kernel_size(), layout)
     out, kinfo = kit.patch_kernel(out, open(ASM).read(), 'click.asm', prim=PRIM, pm_base=base, relocate=False, log=log)
     return out, {'model_id': model_id, 'blob': blob, 'composite': comp, 'preset_id': pid, 'pm_base': base,
                  'entry': kinfo['entry'], 'params': params}
