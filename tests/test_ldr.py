@@ -1,5 +1,6 @@
 """Entry 2's LDR blocks: data that is all zeros goes in as a zero-fill (tag 1) block, as stock loads its own zeroed arrays."""
 import os
+import re
 import struct
 import subprocess
 import sys
@@ -8,6 +9,7 @@ from pathlib import Path
 import pytest
 
 import patch_amp as pa
+import visa_dis as vd
 
 ROOT = Path(__file__).resolve().parent.parent
 PAYLOAD = {5: lambda c: ((c + 1) & ~1) * 3 // 2, 4: lambda c: c, 3: lambda c: (c + 1) // 2, 6: lambda c: c * 2,
@@ -31,6 +33,27 @@ def entry2(hxf):
     data, _ = pa.load_l6ia_from_any(str(hxf))
     ent = pa.l6ia.parse(data)[2]
     return data[ent['payload_off']:ent['payload_off'] + ent['payload_len']]
+
+
+def boot_kernel(hxf):
+    """Entry 2's first 384 words, the boot kernel: 256 48-bit instructions at PM 0x8c000, as visa_dis text by address."""
+    raw = entry2(hxf)[:384 * 4]
+    return {0x8c000 + k: vd.isa_text(int.from_bytes(raw[6 * k:6 * k + 6], 'little'), 0x8c000 + k) for k in range(256)}
+
+
+def handlers(code):
+    """{tag: address of its code}, from the kernel's dispatch (R0 = PASS R8, then IF EQ JUMP and R0 = R0 - 1 in turn),
+    through a plain JUMP that two tags share."""
+    pc = next(a for a, t in code.items() if t == 'R0 = PASS R8') + 1
+    out = {}
+    while m := re.fullmatch(r'IF EQ JUMP (0x[0-9a-f]+)', code[pc]):
+        to = int(m[1], 16)
+        jump = re.fullmatch(r'JUMP (0x[0-9a-f]+)', code[to])
+        out[len(out)] = int(jump[1], 16) if jump else to
+        if code[pc + 1] != 'R0 = R0 - 1':
+            break
+        pc += 2
+    return out
 
 
 def test_all_zero_data_is_a_zero_fill_block():
@@ -71,3 +94,23 @@ def test_the_build_loads_no_all_zero_init_block(tmp_path):
     assert not [b for b in stock_blocks if b[0] == 4 and b[1] and not any(b[3])], 'stock itself had one'
     assert not [(hex(a), c) for t, c, a, p in ours if t == 4 and c and not any(p)]
     assert sum(t == 1 for t, *_ in ours) > sum(t == 1 for t, *_ in stock_blocks)
+
+
+@pytest.mark.firmware
+def test_the_boot_kernel_zero_fills_the_words_a_data_block_would_write():
+    stock = os.environ.get('HX_STOMP_HXF')
+    if not stock:
+        pytest.skip('HX_STOMP_HXF is not set')
+    code = boot_kernel(stock)
+    run = lambda a, n: [code[a + k] for k in range(n)]
+    tag = handlers(code)
+    assert sorted(tag) == list(range(11)) and tag[0] == 0x8c07c
+    assert tag[7] == tag[8] == tag[1] and tag[9] == tag[10] == tag[4]
+    dispatch = next(a for a, t in code.items() if t == 'R0 = PASS R8')
+    assert run(dispatch - 3, 3) == ['R8 = DM(0x92003)', 'R2 = DM(0x92004)', 'R3 = DM(0x92005)']    # tag, count, address
+    nxt = re.fullmatch(r'JUMP (0x[0-9a-f]+)', code[tag[1] + 5])[1]
+    assert run(tag[1], 6) == ['I0 = R3', 'R0 = 0', 'R1 = 0', f'LCNTR = R2, DO {tag[1] + 4:#x} UNTIL LCE',
+                              'DM(I0,M6) = R0', f'JUMP {nxt}']
+    assert run(tag[4], 7) == ['I0 = R3', f'LCNTR = R2, DO {tag[4] + 5:#x} UNTIL LCE', 'CALL 0x8c033 (DB)', 'NOP', 'NOP',
+                              'DM(I0,M6) = R8', f'JUMP {nxt}']
+    assert [(a, t) for a, t in code.items() if re.search(r'\bM6 =', t or '')] == [(0x8c00f, 'M6 = 1')]
