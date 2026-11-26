@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build HXtra, HX Stomp firmware 3.80.0 with NAM A2 Lite, from your own copy of the stock firmware.
+"""Build HXtra 3.80.0 from your own copy of the stock firmware.
 
 usage: python3 build.py HX_Stomp_v3.80.0_0x103966115.hxf [-o out.hxf] [--no-check]
                         [--splash picture [--splash-fit fill|fit]] [--splash-text "text" [--splash-glyph EMOJI=picture ...]]
@@ -8,7 +8,8 @@ The input is Line 6's own HX Stomp firmware file, version 3.80.0
 (Line 6 Updater keeps a copy; see README.md). Nothing of it is in this
 repository: the build reads it, adds NAM A2 Lite and writes a new .hxf
 (default build/HX_Stomp_v3.80.0_HXtra.hxf) for Line 6 Updater.
-HXtra is for the HX Stomp only: any other file is refused.
+The HX Effects CLI build uses the stock HX Effects 3.80.0 file and adds NAM A2 Lite.
+It supports -o, --no-check, and HX_NAM_SLOTS=1, 2 or 3.
 
 NAM A2 Lite runs as up to three blocks at once, each playing its own capture from a User IR slot.
 HX_NAM_SLOTS=3, 2, 1 or 0 sets how many (0: no NAM A2 Lite); unset, the most that
@@ -31,14 +32,19 @@ Steps:
   4. tools/l6ia_verify.py: every checksum of the result
   5. tools/hxf.py pack: the .hxf
 """
+import argparse
 import hashlib
 import os
+from pathlib import Path
 import subprocess
 import sys
+import tempfile
 
 STOCK_MD5 = {
     "a2cd8f4ae56f49415380270ebc484bf1": "HX_Stomp",       # HX_Stomp_v3.80.0_0x103966115.hxf
 }
+# The browser uses the Stomp tables above. HX Effects is CLI-only.
+HX_EFFECTS_STOCK_MD5 = "7c2ebdf1bffb6bcc5f89dda97f91e40c"
 # The kernel and the patch_amp.py steps (tests/test_web_build.py keeps web/firmware-worker.js's copies
 # equal). Each step reads the previous one's output: patch_amp.py CMD IN OUT ARGS...
 #
@@ -79,15 +85,66 @@ def run(*args):
     return r.stdout
 
 
+def build_effects(stock, argv):
+    parser = argparse.ArgumentParser(prog="build.py " + os.path.basename(stock),
+                                     description="Build NAM A2 Lite for HX Effects 3.80.0.")
+    parser.add_argument("-o", type=Path)
+    parser.add_argument("--no-check", action="store_true")
+    args = parser.parse_args(argv)
+    out = args.o.resolve() if args.o else Path(HERE) / "build/HX_Effects_v3.80.0_HXtra.hxf"
+    if out == Path(stock).resolve() or (out.exists() and os.path.samefile(out, stock)):
+        parser.error("the output must be a separate file from the stock firmware")
+    slots = os.environ.get("HX_NAM_SLOTS", "3")
+    if slots not in {"1", "2", "3"}:
+        parser.error("HX_NAM_SLOTS must be 1, 2 or 3 for HX Effects")
+
+    sys.path.insert(0, os.path.join(HERE, "tools"))
+    from l6ia import parse
+
+    print(f"stock firmware: HX Effects 3.80.0\nNAM slots: {slots}")
+    py = sys.executable
+    with tempfile.TemporaryDirectory() as directory:
+        work = Path(directory)
+        original, model, image = (work / f"{name}.l6ia" for name in ("stock", "model", "image"))
+        asm = work / "nam.asm"
+        run(py, "tools/sharc/nam_multi.py", "--mid-sweep", "--effects", "--slots", slots,
+            "-o", str(asm), *([] if args.no_check else ["--check"]))
+        run(py, "tools/hxf.py", "unpack", stock, str(original))
+        run(py, "tools/patch_amp.py", "effects-eq", str(original), str(model))
+        run(py, "tools/patch_amp.py", "patch", str(model), str(image), "--asm", str(asm))
+        if "ALL OK" not in run(py, "tools/l6ia_verify.py", str(image)):
+            sys.exit("build.py: the image failed its check")
+
+        def payloads(data):
+            return [data[e["payload_off"]:e["payload_off"] + e["payload_len"]] for e in parse(data)]
+
+        before, after = payloads(original.read_bytes()), payloads(image.read_bytes())
+        if len(before) != 14 or len(after) != 14:
+            sys.exit("build.py: unexpected HX Effects entry count")
+        # Payload start sector and exclusive end for the fixed 3.80.0 data partitions.
+        partitions = {2: (0x8803, 0x8C03), 3: (0x8C04, 0x9406), 4: (0x9407, 0x11005)}
+        for entry, (start, end) in partitions.items():
+            if len(after[entry]) > (end - start) * 512:
+                sys.exit(f"build.py: HX Effects entry {entry} exceeds its eMMC partition")
+        if any(old != new for entry, (old, new) in enumerate(zip(before, after))
+               if entry != 0 and entry not in partitions):
+            sys.exit("build.py: unexpected HX Effects payload change")
+        if args.o is None:
+            out.parent.mkdir(exist_ok=True)
+        run(py, "tools/hxf.py", "pack", str(image), str(out), "--donor", stock)
+    print(f"\nDone: {out}")
+
+
 def main():
     argv = sys.argv[1:]
     if not argv or argv[0].startswith("-"):
         sys.exit(__doc__)
     stock = os.path.abspath(argv[0])
     md5 = hashlib.md5(open(stock, "rb").read()).hexdigest()
+    if md5 == HX_EFFECTS_STOCK_MD5:
+        return build_effects(stock, argv[1:])
     if md5 not in STOCK_MD5:
-        sys.exit(f"{stock}: MD5 {md5}, not the stock HX Stomp 3.80.0 firmware (HX_Stomp_v3.80.0_0x103966115.hxf). "
-                 "HXtra is for the HX Stomp only.")
+        sys.exit(f"{stock}: MD5 {md5}, not the stock HX Stomp or HX Effects 3.80.0 firmware.")
     unit = STOCK_MD5[md5]
     print(f"stock firmware: {unit.replace('_', ' ')} 3.80.0")
     splash = os.path.abspath(argv[argv.index("--splash") + 1]) if "--splash" in argv else None

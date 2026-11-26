@@ -4,14 +4,23 @@ Most people never need this page: the [setup page](https://wisemandenny.github.i
 
 ## Requirements
 
-- An **HX Stomp**: HXtra is for the HX Stomp only, and `build.py` refuses any other firmware file.
-- Line 6's firmware 3.80.0 for the HX Stomp. The build checks the MD5 and refuses any other file:
+- An **HX Stomp**, or an **HX Effects** for the command-line NAM A2 Lite build.
+- Line 6's firmware 3.80.0 for the target unit. The build checks the MD5:
   - `HX_Stomp_v3.80.0_0x103966115.hxf`, MD5 `a2cd8f4ae56f49415380270ebc484bf1`. Download it from [line6.com](https://line6.com/software/readeula.html?rid=12906); you need to sign in with a free Line 6 (Helix) account to get the download.
+  - `HX_Effects_v3.80.0_0xd97239907.hxf`, MD5 `7c2ebdf1bffb6bcc5f89dda97f91e40c`.
 - Python 3.10 or newer with `numpy`: `pip install numpy`. To run a build from RAM from the command line, also `pyusb` and `dfu-util`.
 - For every feature but the boot screen and real block names, clang: their M4 code is assembled with it at build time. On a Mac, Apple's Command Line Tools (`xcode-select --install`); on Linux or WSL, `apt install clang` (clang 18 gives the same bytes as Apple's). `tools/m4asm.py` takes `HX_CLANG` (a path, or a name on `PATH`) first, then the Command Line Tools' clang, then `clang` on `PATH`. For the boot screen, macOS converts pictures (`sips`) and renders emoji (`swift`); elsewhere give a 320x240 PNG and `--splash-glyph` pictures.
 - **Line 6 Updater** to install, and **HX Edit** to import captures.
 
 ## Build
+
+For HX Effects, run `python3 build.py path/to/HX_Effects_v3.80.0_0xd97239907.hxf`.
+The output is `build/HX_Effects_v3.80.0_HXtra.hxf`. Set `HX_NAM_SLOTS` to 1, 2, or 3
+to choose the number of simultaneous NAM blocks (default 3). Find NAM A2 Lite under
+**Distortion → Mono**, in the stock Xenomorph Fuzz Mono slot. The options below
+for other HXtra features and the browser build apply to HX Stomp.
+To run the HX Effects stock-firmware regression test, set `HX_EFFECTS_HXF` to
+your stock file and run `python3 -m pytest tests/test_firmware.py -k HX_EFFECTS_HXF`.
 
 ```sh
 git clone https://github.com/wisemandenny/hxtra.git

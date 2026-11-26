@@ -1,4 +1,4 @@
-"""web/firmware-worker.js, the in-browser build.py: it accepts the same stock file, the HX Stomp's only,
+"""web/firmware-worker.js, the in-browser build.py: it accepts the stock HX Stomp file,
 pins the same built MD5s, and loads every file the build reads; with HX_STOMP_HXF set, its
 copy of the repository builds the features from a release's M4 code (tools/m4cache.py) as
 the repository does with clang."""
@@ -44,7 +44,7 @@ def py_dict(path, name):
     raise KeyError(name)
 
 
-# The stock HX Stomp XL and HX Effects 3.80.0 files, which upstream builds and HXtra refuses
+# The stock HX Stomp XL and HX Effects 3.80.0 files, which the browser refuses.
 NOT_HX_STOMP = {"329e3a26d60d3de1988b6785fa833ee1": "HX_Stomp_XL", "7c2ebdf1bffb6bcc5f89dda97f91e40c": "HX_Effects"}
 
 
@@ -52,8 +52,7 @@ def test_stock_md5_as_build_py():
     assert js_object("STOCK_MD5") == py_dict("build.py", "STOCK_MD5")
 
 
-def test_hx_stomp_only():
-    # No build for anyone without an HX Stomp
+def test_browser_hx_stomp_only():
     assert py_dict("build.py", "STOCK_MD5") == {"a2cd8f4ae56f49415380270ebc484bf1": "HX_Stomp"}
     assert set(py_dict("build.py", "KERNEL")) == set(py_dict("build.py", "STEPS")) == {"HX_Stomp"}
     assert not NOT_HX_STOMP.keys() & js_object("STOCK_MD5").keys()
@@ -68,22 +67,21 @@ def test_worker_refuses_another_file_as_the_page_expects():
     assert "/not the stock/.test(m.text)" in (ROOT / "web/index.html").read_text()
 
 
-@pytest.mark.parametrize("md5", [*NOT_HX_STOMP, None], ids=[*NOT_HX_STOMP.values(), "other"])
+@pytest.mark.parametrize("md5", ["329e3a26d60d3de1988b6785fa833ee1", None], ids=["HX_Stomp_XL", "other"])
 def test_build_py_refuses_another_unit(tmp_path, monkeypatch, md5):
     spec = importlib.util.spec_from_file_location("hxtra_build", ROOT / "build.py")
     build = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(build)
     stock = tmp_path / "stock.hxf"
     stock.write_bytes(b"not firmware")
-    if md5:      # the stock XL and HX Effects files are not in the repository: their MD5 stands in
+    if md5:      # the stock XL file is not in the repository: its MD5 stands in
         monkeypatch.setattr(build.hashlib, "md5", lambda b: types.SimpleNamespace(hexdigest=lambda: md5))
     md5 = md5 or hashlib.md5(b"not firmware").hexdigest()
     monkeypatch.setattr(build, "run", lambda *a: pytest.fail(f"ran {a[1:]}"))
     monkeypatch.setattr(sys, "argv", ["build.py", str(stock), "-o", str(tmp_path / "out.hxf"), "--no-check"])
     with pytest.raises(SystemExit) as e:
         build.main()
-    assert f"MD5 {md5}, not the stock HX Stomp 3.80.0 firmware" in str(e.value)
-    assert "HXtra is for the HX Stomp only" in str(e.value)
+    assert f"MD5 {md5}, not the stock HX Stomp or HX Effects 3.80.0 firmware" in str(e.value)
     assert not (tmp_path / "out.hxf").exists()
 
 

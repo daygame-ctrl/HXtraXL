@@ -1,5 +1,5 @@
-"""The whole build from the stock HX Stomp 3.80.0 .hxf (not in the repo: point HX_STOMP_HXF
-at your copy). The build is deterministic, so the output's
+"""The whole build from stock 3.80.0 firmware. Set HX_STOMP_HXF or HX_EFFECTS_HXF
+to your stock file. The build is deterministic, so the output's
 MD5 is pinned: a change to any byte of the firmware fails here until BUILT_MD5
 is updated on purpose."""
 import hashlib
@@ -17,6 +17,7 @@ pytestmark = pytest.mark.firmware
 # the kernel's --mid-sweep, DSP cost 2275, tools/patch_menu.py's HXtra entry and boot screen.
 BUILT_MD5 = {
     "HX_STOMP_HXF": "a070c1ddaf5d656d195f16d3e784a540",
+    "HX_EFFECTS_HXF": "1c6c0ac2cf65cd42a4a74d57542d56f1",
 }
 
 
