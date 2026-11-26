@@ -11,3 +11,17 @@ The `.hxf` file, its L6IA archive and what each entry holds. Status tags as in [
 - **An Entry 3 too large makes the unit drop every amp and preamp** [verified on unit, 2026-11-11]: every preset with an amp or preamp block loads with 0 blocks (46 of 46 on the dev unit; the other 44 load), and an amp placed alone into an empty preset over USB is dropped too. Bisected with `hx_ctl.py` preset sweeps: Entry 3 at `0xf0d00` bytes (the default build) loads amps; the same Entry 3 zero-padded to `0xf3888` does not, so it is the size, not the contents. The limit lies between `0xf10f0` (below) and `0xf3888`; no constant in that range is in the M4 code. `HX_GR`'s knobs grew it to `0xf3888` (on main too, before `gr-with-nam`); `patch_comp.py` now puts the string section back in the stock tables' dead place at `0x200`, which brings a GR build to `0xd9c88`; amp presets load again on the unit (image `efc35f01…`, `HX_GR=1 HX_CLICK=1 HX_DSP_METER=1`, 2026-11-11). An `HX_CLICK=1` build (no GR) is at `0xf10f0` and loads amps and preamps, and amps can be added [verified on unit, 2026-11-11, image `33ac5cc3…`: main with `HX_TUNER HX_BPM HX_BREATHING_LINE HX_DSP_METER HX_LONG_PRESS HX_MORE_SNAPSHOTS HX_CLICK`, RAM run], so the limit lies between `0xf10f0` and `0xf3888`.
 
 Entries 7 and 8 (the image store) are in [image-store.md](image-store.md).
+
+## HX Effects 3.80.0
+
+**[verified offline]** Parsing the stock HX Effects image and the default CLI NAM build with `tools/l6ia.py` gives 14 entries in each archive. Byte comparison shows that the build changes payloads 0 and 2–4. Entry 1 contains the bootloader and is byte-identical.
+
+| Entry | Stock payload bytes (hex) | Built payload bytes (hex) | eMMC payload sectors (hex, end exclusive) |
+|---|---:|---:|---|
+| 0 | `0x12b3b8` | `0x12b3b8` | |
+| 1 | `0x8a7c` | `0x8a7c` | |
+| 2 | `0x77b98` | `0x7d004` | `0x8803`–`0x8c03` |
+| 3 | `0xba918` | `0xdf248` | `0x8c04`–`0x9406` |
+| 4 | `0xbc9c3c` | `0xda99ac` | `0x9407`–`0x11005` |
+
+The sector ranges come from the existing HX Effects RAM storage probe. Offline RAM layout validation confirms that the patched payloads fit within those ranges. The exact CLI-built image is awaiting an on-unit RAM check.
